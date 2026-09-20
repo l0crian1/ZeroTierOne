@@ -10,9 +10,7 @@
 
 #include "Constants.hpp"
 #include "Node.hpp"
-#include "Packet.hpp"
 #include "RuntimeEnvironment.hpp"
-#include "Switch.hpp"
 
 #include <errno.h>
 #include <stdio.h>
@@ -114,48 +112,6 @@ void PacketMultiplexer::putFrame(void* tPtr, uint64_t nwid, void** nuptr, const 
 	_rxPacketQueues[bucket]->postLimit(packet, 2048);
 }
 
-bool PacketMultiplexer::putWirePacket(void* tPtr, int64_t now, int64_t localSocket, const InetAddress& from, const void* data, unsigned int len)
-{
-#if defined(__APPLE__) || defined(__OpenBSD__) || defined(__NetBSD__) || defined(__WINDOWS__)
-	return false;
-#endif
-
-	if ((! _enabled) || (_concurrency == 0) || (len < ZT_PROTO_MIN_PACKET_LENGTH) || (len > ZT_MAX_PHYSMTU)) {
-		return false;
-	}
-
-	// Fragments share a ring buffer that is not safe to mutate from multiple
-	// threads. Keep that path on the caller (Phy) thread.
-	if ((len > ZT_PROTO_MIN_FRAGMENT_LENGTH) && (reinterpret_cast<const uint8_t*>(data)[ZT_PACKET_FRAGMENT_IDX_FRAGMENT_INDICATOR] == ZT_PACKET_FRAGMENT_INDICATOR)) {
-		return false;
-	}
-
-	WirePacketRecord* packet;
-	_rxWireVector_m.lock();
-	if (_rxWireVector.empty()) {
-		packet = new WirePacketRecord;
-	}
-	else {
-		packet = _rxWireVector.back();
-		_rxWireVector.pop_back();
-	}
-	_rxWireVector_m.unlock();
-
-	packet->tPtr = tPtr;
-	packet->now = now;
-	packet->localSocket = localSocket;
-	packet->from = from;
-	packet->len = len;
-	memcpy(packet->data, data, len);
-
-	const uint8_t* bytes = reinterpret_cast<const uint8_t*>(data);
-	const uint64_t packetId = (((uint64_t)bytes[0]) << 56) | (((uint64_t)bytes[1]) << 48) | (((uint64_t)bytes[2]) << 40) | (((uint64_t)bytes[3]) << 32) | (((uint64_t)bytes[4]) << 24) | (((uint64_t)bytes[5]) << 16)
-							  | (((uint64_t)bytes[6]) << 8) | ((uint64_t)bytes[7]);
-	const unsigned int bucket = (unsigned int)(packetId % _concurrency);
-	_rxWireQueues[bucket]->postLimit(packet, 2048);
-	return true;
-}
-
 void PacketMultiplexer::setUpPostDecodeReceiveThreads(unsigned int concurrency, bool cpuPinningEnabled)
 {
 #if defined(__APPLE__) || defined(__OpenBSD__) || defined(__NetBSD__) || defined(__WINDOWS__)
@@ -166,36 +122,8 @@ void PacketMultiplexer::setUpPostDecodeReceiveThreads(unsigned int concurrency, 
 	for (unsigned int i = 0; i < _concurrency; ++i) {
 		fprintf(stderr, "Reserved queue for thread %d\n", i);
 		_rxPacketQueues.push_back(new BlockingQueue<PacketRecord*>());
-		_rxWireQueues.push_back(new BlockingQueue<WirePacketRecord*>());
 	}
 	_enabled = true;
-
-	// Decrypt/decode workers. These take the crypto off the single Phy thread
-	// so inbound throughput can scale with `concurrency`.
-	for (unsigned int i = 0; i < _concurrency; ++i) {
-		_rxWireThreads.push_back(std::thread([this, i, cpuPinningEnabled]() {
-			fprintf(stderr, "Created inbound decrypt thread %d\n", i);
-			if (cpuPinningEnabled) {
-				pinCurrentThread(i, _concurrency);
-			}
-
-			WirePacketRecord* packet = nullptr;
-			for (;;) {
-				if (! _rxWireQueues[i]->get(packet)) {
-					break;
-				}
-				if (! packet) {
-					break;
-				}
-				RR->node->_now = packet->now;
-				RR->sw->onRemotePacket(packet->tPtr, packet->localSocket, packet->from, packet->data, packet->len);
-				{
-					Mutex::Lock l(_rxWireVector_m);
-					_rxWireVector.push_back(packet);
-				}
-			}
-		}));
-	}
 
 	// Each thread picks from its own queue to feed into the core
 	for (unsigned int i = 0; i < _concurrency; ++i) {

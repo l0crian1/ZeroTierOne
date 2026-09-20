@@ -10,7 +10,6 @@
 #define ZT_PACKET_MULTIPLEXER_HPP
 
 #include "../osdep/BlockingQueue.hpp"
-#include "InetAddress.hpp"
 #include "MAC.hpp"
 #include "Mutex.hpp"
 #include "RuntimeEnvironment.hpp"
@@ -34,15 +33,6 @@ struct PacketRecord {
 	int32_t flowId;
 };
 
-struct WirePacketRecord {
-	void* tPtr;
-	int64_t now;
-	int64_t localSocket;
-	InetAddress from;
-	unsigned int len;
-	uint8_t data[ZT_MAX_PHYSMTU];
-};
-
 class PacketMultiplexer {
   public:
 	const RuntimeEnvironment* RR;
@@ -51,31 +41,17 @@ class PacketMultiplexer {
 
 	void setUpPostDecodeReceiveThreads(unsigned int concurrency, bool cpuPinningEnabled);
 
-	inline bool enabled() const
-	{
-		return _enabled;
-	}
-
 	void putFrame(void* tPtr, uint64_t nwid, void** nuptr, const MAC& source, const MAC& dest, unsigned int etherType, unsigned int vlanId, const void* data, unsigned int len, int32_t flowId);
 
-	/**
-	 * Queue an unfragmented wire packet for decrypt/decode on a worker thread.
-	 * @return true if the packet was queued, false if the caller should process it inline
-	 */
-	bool putWirePacket(void* tPtr, int64_t now, int64_t localSocket, const InetAddress& from, const void* data, unsigned int len);
-
 	std::vector<BlockingQueue<PacketRecord*>*> _rxPacketQueues;
-	std::vector<BlockingQueue<WirePacketRecord*>*> _rxWireQueues;
 
 	unsigned int _concurrency = 0;
 	// pool
 	std::vector<PacketRecord*> _rxPacketVector;
-	std::vector<WirePacketRecord*> _rxWireVector;
 	std::vector<std::thread> _rxPacketThreads;
-	Mutex _rxPacketVector_m, _rxPacketThreads_m, _rxWireVector_m;
+	Mutex _rxPacketVector_m, _rxPacketThreads_m;
 
 	std::vector<std::thread> _rxThreads;
-	std::vector<std::thread> _rxWireThreads;
 	bool _enabled = false;
 };
 

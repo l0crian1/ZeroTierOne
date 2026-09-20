@@ -207,11 +207,7 @@ Node::~Node()
 ZT_ResultCode Node::processWirePacket(void* tptr, int64_t now, int64_t localSocket, const struct sockaddr_storage* remoteAddress, const void* packetData, unsigned int packetLength, volatile int64_t* nextBackgroundTaskDeadline)
 {
 	_now = now;
-	const InetAddress from(*(reinterpret_cast<const InetAddress*>(remoteAddress)));
-	if (RR->pm && RR->pm->putWirePacket(tptr, now, localSocket, from, packetData, packetLength)) {
-		return ZT_RESULT_OK;
-	}
-	RR->sw->onRemotePacket(tptr, localSocket, from, packetData, packetLength);
+	RR->sw->onRemotePacket(tptr, localSocket, *(reinterpret_cast<const InetAddress*>(remoteAddress)), packetData, packetLength);
 	return ZT_RESULT_OK;
 }
 
