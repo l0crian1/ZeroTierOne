@@ -3943,7 +3943,7 @@ class OneServiceImpl : public OneService {
 
 						n.setTap(
 							EthernetTap::newInstance(
-								nullptr, 1, _cpuPinningEnabled, _homePath.c_str(), MAC(nwc->mac), nwc->mtu,
+								nullptr, _concurrency, _cpuPinningEnabled, _homePath.c_str(), MAC(nwc->mac), nwc->mtu,
 								(unsigned int)ZT_IF_METRIC, nwid, friendlyName, StapFrameHandler, (void*)this));
 						*nuptr = (void*)&n;
 

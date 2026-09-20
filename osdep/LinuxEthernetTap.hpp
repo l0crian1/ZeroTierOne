@@ -10,6 +10,7 @@
 #define ZT_LINUXETHERNETTAP_HPP
 
 #include "../node/MulticastGroup.hpp"
+#include "../node/Mutex.hpp"
 #include "BlockingQueue.hpp"
 #include "EthernetTap.hpp"
 
@@ -24,6 +25,14 @@
 #include <vector>
 
 namespace ZeroTier {
+
+struct TapFrameRecord {
+	uint64_t from;
+	uint64_t to;
+	unsigned int etherType;
+	unsigned int len;
+	uint8_t data[ZT_MAX_MTU];
+};
 
 class LinuxEthernetTap : public EthernetTap {
   public:
@@ -66,6 +75,7 @@ class LinuxEthernetTap : public EthernetTap {
 	std::string _dev;
 	std::vector<MulticastGroup> _multicastGroups;
 	unsigned int _mtu;
+	unsigned int _concurrency;
 	int _fd;
 	int _shutdownSignalPipe[2];
 	std::atomic_bool _enabled;
@@ -73,6 +83,10 @@ class LinuxEthernetTap : public EthernetTap {
 	mutable std::vector<InetAddress> _ifaddrs;
 	mutable uint64_t _lastIfAddrsUpdate;
 	std::vector<std::thread> _rxThreads;
+	std::vector<std::thread> _handlerThreads;
+	std::vector<BlockingQueue<TapFrameRecord*>*> _txQueues;
+	std::vector<TapFrameRecord*> _txPool;
+	Mutex _txPool_m;
 };
 
 }	// namespace ZeroTier
