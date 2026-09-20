@@ -3249,15 +3249,29 @@ class OneServiceImpl : public OneService {
 		_concurrency = OSUtils::jsonInt(settings["concurrency"], 1);
 		_cpuPinningEnabled = OSUtils::jsonBool(settings["cpuPinningEnabled"], false);
 		if (_multicoreEnabled) {
-			unsigned int maxConcurrency = std::thread::hardware_concurrency();
-			if (_concurrency <= 1 || _concurrency >= maxConcurrency) {
-				unsigned int conservativeDefault = (std::thread::hardware_concurrency() >= 4 ? 2 : 1);
+			unsigned int hwConcurrency = std::thread::hardware_concurrency();
+			if (hwConcurrency < 1) {
+				hwConcurrency = 1;
+			}
+			if (_concurrency < 1) {
+				_concurrency = 1;
+			}
+			if (_concurrency == 1) {
+				unsigned int conservativeDefault = (hwConcurrency >= 4 ? 2 : 1);
 				fprintf(
 					stderr,
-					"Concurrency level provided (%d) is invalid, assigning conservative default value of (%d)\n",
-					_concurrency, conservativeDefault);
+					"No concurrency level provided, assigning default value of (%u)\n", conservativeDefault);
 				_concurrency = conservativeDefault;
 			}
+			else if (_concurrency > hwConcurrency) {
+				fprintf(
+					stderr,
+					"Concurrency level provided (%u) exceeds hardware concurrency (%u), clamping to %u\n",
+					_concurrency, hwConcurrency, hwConcurrency);
+				_concurrency = hwConcurrency;
+			}
+			fprintf(stderr, "Multicore enabled with concurrency=%u (hardware concurrency=%u), cpu pinning=%s\n",
+				_concurrency, hwConcurrency, _cpuPinningEnabled ? "on" : "off");
 			setUpMultithreading();
 		}
 		else {

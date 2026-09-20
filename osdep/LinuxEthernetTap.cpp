@@ -33,6 +33,8 @@
 #include <linux/if_tun.h>
 #include <net/if_arp.h>
 #include <netinet/in.h>
+#include <pthread.h>
+#include <sched.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -50,6 +52,10 @@
 
 #ifndef IFNAMSIZ
 #define IFNAMSIZ 16
+#endif
+
+#ifndef IFF_MULTI_QUEUE
+#define IFF_MULTI_QUEUE 0x0100
 #endif
 
 #define ZT_TAP_BUF_SIZE (1024 * 16)
@@ -206,15 +212,53 @@ LinuxEthernetTap::LinuxEthernetTap(
 #endif
 	}
 
+	bool multiQueue = false;
 	ifr.ifr_flags = IFF_TAP | IFF_NO_PI;
+	if (concurrency > 1) {
+		ifr.ifr_flags |= IFF_MULTI_QUEUE;
+	}
 	if (ioctl(_fd, TUNSETIFF, (void*)&ifr) < 0) {
-		::close(_fd);
-		throw std::runtime_error("unable to configure TUN/TAP device for TAP operation");
+		ifr.ifr_flags = IFF_TAP | IFF_NO_PI;
+		if (ioctl(_fd, TUNSETIFF, (void*)&ifr) < 0) {
+			::close(_fd);
+			throw std::runtime_error("unable to configure TUN/TAP device for TAP operation");
+		}
+	}
+	else if (concurrency > 1) {
+		multiQueue = true;
 	}
 
 	::ioctl(_fd, TUNSETPERSIST, 0);	  // valgrind may generate a false alarm here
 	_dev = ifr.ifr_name;
 	::fcntl(_fd, F_SETFD, fcntl(_fd, F_GETFD) | FD_CLOEXEC);
+	(void)::fcntl(_fd, F_SETFL, fcntl(_fd, F_GETFL) | O_NONBLOCK);
+	_tapFds.push_back(_fd);
+
+	if (multiQueue) {
+		for (unsigned int q = 1; q < concurrency; ++q) {
+			int qfd = ::open("/dev/net/tun", O_RDWR);
+			if (qfd <= 0) {
+				qfd = ::open("/dev/tun", O_RDWR);
+			}
+			if (qfd <= 0) {
+				fprintf(stderr, "WARNING: unable to open extra TAP queue %u: %s\n", q, strerror(errno));
+				break;
+			}
+			struct ifreq qifr;
+			memset(&qifr, 0, sizeof(qifr));
+			Utils::scopy(qifr.ifr_name, sizeof(qifr.ifr_name), _dev.c_str());
+			qifr.ifr_flags = IFF_TAP | IFF_NO_PI | IFF_MULTI_QUEUE;
+			if (ioctl(qfd, TUNSETIFF, (void*)&qifr) < 0) {
+				fprintf(stderr, "WARNING: unable to attach TAP queue %u: %s\n", q, strerror(errno));
+				::close(qfd);
+				break;
+			}
+			::fcntl(qfd, F_SETFD, fcntl(qfd, F_GETFD) | FD_CLOEXEC);
+			(void)::fcntl(qfd, F_SETFL, fcntl(qfd, F_GETFL) | O_NONBLOCK);
+			_tapFds.push_back(qfd);
+		}
+		fprintf(stderr, "TAP %s using %u queue(s) for concurrency %u\n", _dev.c_str(), (unsigned int)_tapFds.size(), concurrency);
+	}
 
 	(void)::pipe(_shutdownSignalPipe);
 
@@ -234,6 +278,7 @@ LinuxEthernetTap::LinuxEthernetTap(
 				}
 			}
 
+			const int tapFd = _tapFds[i % _tapFds.size()];
 			uint8_t b[ZT_TAP_BUF_SIZE];
 			fd_set readfds, nullfds;
 			int n, nfds, r;
@@ -300,7 +345,7 @@ LinuxEthernetTap::LinuxEthernetTap(
 					}
 				}
 
-				fcntl(_fd, F_SETFL, O_NONBLOCK);
+				fcntl(tapFd, F_SETFL, O_NONBLOCK);
 
 				::close(sock);
 			}
@@ -311,21 +356,21 @@ LinuxEthernetTap::LinuxEthernetTap(
 
 			FD_ZERO(&readfds);
 			FD_ZERO(&nullfds);
-			nfds = (int)std::max(_shutdownSignalPipe[0], _fd) + 1;
+			nfds = (int)std::max(_shutdownSignalPipe[0], tapFd) + 1;
 
 			r = 0;
 			for (;;) {
 				FD_SET(_shutdownSignalPipe[0], &readfds);
-				FD_SET(_fd, &readfds);
+				FD_SET(tapFd, &readfds);
 				select(nfds, &readfds, &nullfds, &nullfds, (struct timeval*)0);
 
 				if (FD_ISSET(_shutdownSignalPipe[0], &readfds)) {
 					break;
 				}
-				if (FD_ISSET(_fd, &readfds)) {
+				if (FD_ISSET(tapFd, &readfds)) {
 					for (;;) {
 						// read until there are no more packets, then return to outer select() loop
-						n = (int)::read(_fd, b + r, ZT_TAP_BUF_SIZE - r);
+						n = (int)::read(tapFd, b + r, ZT_TAP_BUF_SIZE - r);
 						if (n > 0) {
 							// Some tap drivers like to send the ethernet frame and the
 							// payload in two chunks, so handle that by accumulating
@@ -359,7 +404,12 @@ LinuxEthernetTap::~LinuxEthernetTap()
 {
 	_run = false;
 	(void)::write(_shutdownSignalPipe[1], "\0", 1);
-	::close(_fd);
+	for (int fd : _tapFds) {
+		if (fd > 0) {
+			::close(fd);
+		}
+	}
+	_fd = -1;
 	::close(_shutdownSignalPipe[0]);
 	::close(_shutdownSignalPipe[1]);
 	for (std::thread& t : _rxThreads) {
